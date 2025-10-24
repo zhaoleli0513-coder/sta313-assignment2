@@ -1,0 +1,925 @@
+---
+title: "Who lives on the Rent Line? Immigrants or Non-immigrants"
+author: "By Melody Teng and Zhaole Li"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+\newpage
+
+
+```{r setup-more, message=FALSE, warning=FALSE, include=FALSE}
+library(readr)
+library(dplyr)
+library(stringr)
+library(forcats)
+library(tidyverse)
+library(janitor)
+library(ggrepel)
+library(here)
+library(survey)
+library(scales)
+library(grid)
+library(tidyr)
+library(ggplot2)
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r setup, include=FALSE}
+if (!is.null(knitr::current_input())) {
+  knitr::opts_knit$set(root.dir = dirname(knitr::current_input()))
+} else if (interactive() && requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+  p <- tryCatch(rstudioapi::getActiveDocumentContext()$path, error = function(e) "")
+  if (nzchar(p)) setwd(dirname(normalizePath(p)))
+}
+
+message("WD = ", getwd())
+
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# Read CSVs and clean variable names
+census21_metro <- read_csv("census_21_metro.csv") |> clean_names()
+census21_other <- read_csv("census_21_other.csv") |> clean_names()
+census16_metro <- read_csv("census_16_metro.csv") |> clean_names()
+census16_other <- read_csv("census_16_other.csv") |> clean_names()
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# Add year and area tags
+add_tags <- function(df, year, area){
+  df |> mutate(year = year, area = area)
+}
+
+census_all <- bind_rows(
+  add_tags(census16_metro, 2016, "metro"),
+  add_tags(census16_other, 2016, "other"),
+  add_tags(census21_metro, 2021, "metro"),
+  add_tags(census21_other, 2021, "other")
+)
+
+# 1) Recode "Not available / Not applicable" to NA for variables we will use
+clean_base <- census_all |>
+  mutate(
+    # categorical recodes to NA
+    immstat   = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    yrimm      = ifelse(yrimm %in% c(8888, 9999), NA_integer_, yrimm),
+    hh_inc_at  = ifelse(hh_inc_at %in% c(88), NA_integer_, hh_inc_at),
+    tenur     = ifelse(tenur %in% c(8), NA_integer_, tenur),
+    prihm     = ifelse(prihm %in% c(9), NA_integer_, prihm),
+    # weights: drop zeros/negatives if any
+    weight    = ifelse(is.finite(weight) & weight > 0, weight, NA_real_)
+  )
+
+# 2) Enforce numeric sanity on key continuous vars
+clean_base <- clean_base |>
+  mutate(
+    tot_inc_at = ifelse(is.finite(tot_inc_at) & tot_inc_at > 0, tot_inc_at, NA_real_),
+    shelco     = ifelse(is.finite(shelco)     & shelco >= 0,   shelco,     NA_real_)
+  )
+
+# 3) Keep rows that have what we NEED for RQ1 (others can be NA and kept for later RQs)
+#    For RQ1 we need: immstat, tot_inc_at, shelco, prihm, weight, year, area, cma, pr
+rq1_clean <- clean_base |>
+  filter(
+    !is.na(immstat),
+    !is.na(tot_inc_at),
+    !is.na(shelco),
+    !is.na(prihm),
+    !is.na(weight)
+  )
+
+# 4) A convenience flag for CMA=999 handling:
+#    Keep CMA==999 for national/ALL-areas views; we'll drop it only in CMA-specific charts.
+rq1_clean <- rq1_clean |>
+  mutate(is_other_geo = (cma == 999))
+
+```
+
+Every week a familiar claim ricochets across social media and city council hearings that immigrants are the reason housing feels unaffordable for local Canadians. The data tell a more interesting story. Using person level microdata from the 2016 and 2021 censuses on Statistics Canada and focusing on the shelter to income ratio (STIR), the share of income after tax devoted to housing, we asked a simple question with layered answers. Do immigrants spend a larger share of income on housing than non-immigrants, where does that gap come from, how has it changed across cities, and is the blame game even pointing in the right direction? Comparing the gaps between immigrants and non-immigrants in various aspects is a topic worth exploring. Each country has completely different policies towards immigrants, and these disparities heavily depend on the government's attitude towards immigrants.
+
+The STIR that flows through the article is calculated by dividing the annualized monthly shelter cost by the individual's after-tax income for the primary household maintainer. In other words, we can interpret STIR directly as the housing cost burden for an individual. Higher STIR indicates lower housing affordability.
+
+
+# On the National Snapshot: Immigrants Face Higher Housing Cost Burdens
+Begin with a fair comparison. Look only at primary household maintainers and apply census person weights so we are describing the population rather than a sample. Start with the severely cost-burdened benchmark at 50 percent of income after tax. In both 2016 and 2021, immigrants were much more likely than non-immigrants to cross that line, although both groups improved slightly over the five years. The 30 percent benchmark represents moderately cost-burdened. The pattern repeats at that level as well, with immigrants consistently more exposed to housing cost stress (Figure 1). This is not a marginal hardship; it is the boundary between getting by and cutting essentials. Newcomers often arrive with lower initial earnings and cluster in high-cost CMAs such as Toronto, Vancouver, and Montréal, and thinner credit files and unfamiliar screening rules steer them toward renting in the early years, all of which lift STIR, lowering housing affordability.
+```{r echo=FALSE}
+# 1) Recode invalid codes to NA ONLY for variables used in RQ1
+rq1_base <- census_all |>
+  mutate(
+    # categorical invalids -> NA
+    immstat = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    prihm   = ifelse(prihm   %in% c(9),  NA_integer_, prihm),
+    # numeric sanity
+    tot_inc_at = ifelse(is.finite(tot_inc_at) & tot_inc_at > 0, tot_inc_at, NA_real_),
+    shelco     = ifelse(is.finite(shelco)     & shelco >= 0,    shelco,     NA_real_),
+    weight     = ifelse(is.finite(weight)     & weight > 0,     weight,     NA_real_)
+  ) |>
+  # keep only what this analysis needs
+  select(year, immstat, prihm, tot_inc_at, shelco, weight)
+
+# 2) Construct STIR and immigrant groups; focus on primary household maintainer
+rq1_aff <- rq1_base |>
+  filter(!is.na(immstat), !is.na(prihm), !is.na(tot_inc_at), !is.na(shelco), !is.na(weight)) |>
+  mutate(
+    immigrant_group = case_when(
+      immstat == 1 ~ "Non-immigrant",
+      immstat == 2 ~ "Immigrant",
+      immstat == 3 ~ "Non-permanent resident",
+      TRUE ~ NA_character_
+    ),
+    stir = (shelco * 12) / pmax(tot_inc_at, 1)
+  ) |>
+  filter(prihm == 1, !is.na(immigrant_group), is.finite(stir), stir >= 0) |>
+  mutate(
+    immigrant_group = fct_relevel(immigrant_group, "Non-immigrant", "Immigrant", "Non-permanent resident")
+  )
+
+### Compute weighted national burden shares at 30% and 50%
+# helper to compute weighted share above a threshold
+w_share_over <- function(x, w, thr){
+  ok <- is.finite(x) & is.finite(w)
+  if (!any(ok)) return(NA_real_)
+  sum(w[ok] * (x[ok] >= thr)) / sum(w[ok])
+}
+
+thresholds <- c(`≥30%` = 0.30, `≥50%` = 0.50)
+
+rq1_nat <- rq1_aff |>
+  mutate() |>
+  group_by(year, immigrant_group) |>
+  summarize(
+    share_ge_30 = w_share_over(stir, weight, thresholds["≥30%"]),
+    share_ge_50 = w_share_over(stir, weight, thresholds["≥50%"]),
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = starts_with("share_ge_"),
+               names_to = "threshold",
+               values_to = "share") |>
+  mutate(
+    threshold = recode(threshold,
+                       share_ge_30 = "≥30%",
+                       share_ge_50 = "≥50%"),
+    threshold = factor(threshold, levels = c("≥30%","≥50%"))
+  )
+
+# compute gap annotations (Immigrant minus Non-immigrant) by year & threshold
+rq1_gaps <- rq1_nat |>
+  select(year, immigrant_group, threshold, share) |>
+  pivot_wider(names_from = immigrant_group, values_from = share) |>
+  mutate(
+    gap = `Immigrant` - `Non-immigrant`
+  )
+
+
+```
+
+```{r rq1-plot, fig.width=10, fig.height=5, echo=FALSE}
+# Macaron palette to reuse later
+macaron_pal <- c("Non-immigrant" = "#F8C8DC",  # pastel pink
+                 "Immigrant"     = "#B8E0D2")  # pastel mint
+
+# --- Base bars (unchanged logic, new colors) ---
+p <- ggplot(rq1_nat |> filter(immigrant_group %in% c("Non-immigrant","Immigrant")),
+            aes(x = immigrant_group, y = share, fill = immigrant_group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = scales::percent(share, accuracy = 0.1)),
+            position = position_dodge(width = 0.8),
+            vjust = -0.4, size = 3.4) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, NA)) +
+  scale_fill_manual(values = macaron_pal) +
+  facet_grid(threshold ~ year, switch = "y") +
+  labs(
+    title = "Canada Housing Cost Burden: immigrants vs non-immigrants",
+    subtitle = "National shares at STIR ≥30%(mildly burdened) and ≥50%(severely burdened), 2016 vs 2021.",
+    x = NULL,
+    y = "Share of people (weighted)",
+    fill = NULL,
+    caption = "STIR (shelter-to-income ratio) = (monthly shelter cost × 12) / individual after-tax income. Weighted estimates using person weights. \n\nFigure 1"
+  ) +
+  theme(
+    legend.position = "top",
+    strip.placement = "outside",
+    strip.background = element_rect(fill = NA, colour = NA),
+    strip.text.y.left = element_text(angle = 0)
+  ) + 
+  theme(
+    plot.caption.position = "plot",
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 8))
+  )
+
+
+# --- Facet-specific maxima (reuse for arrow endpoints) ---
+facet_tops <- rq1_nat |>
+  dplyr::group_by(year, threshold) |>
+  dplyr::summarize(ymax = max(share, na.rm = TRUE), .groups = "drop") |>
+  dplyr::mutate(
+    # axis arrow endpoints per facet
+    x_arrow_start = 0.6, x_arrow_end = 2.4,  # spans the two categories
+    y_arrow_start = 0,   y_arrow_end = ymax * 1.02
+  )
+
+# --- Draw axis arrows (x and y) in every facet; removed gap text annotations ---
+p +
+  geom_segment(
+    data = facet_tops,
+    aes(x = x_arrow_start, y = y_arrow_start, xend = x_arrow_end, yend = y_arrow_start),
+    inherit.aes = FALSE,
+    linewidth = 0.5,
+    arrow = arrow(length = unit(6, "pt"), type = "closed")
+  ) +
+  geom_segment(
+    data = facet_tops,
+    aes(x = x_arrow_start, y = y_arrow_start, xend = x_arrow_start, yend = y_arrow_end),
+    inherit.aes = FALSE,
+    linewidth = 0.5,
+    arrow = arrow(length = unit(6, "pt"), type = "closed")
+  ) +
+  coord_cartesian(clip = "off")
+
+```
+
+# From National Average to Local Divergence: Housing Burden Shifts across Canadian CMAs
+Canada is a country of cities, and cities tell the real story. Once we rank metropolitan areas by how their immigrant to non-immigrant STIR gap changed from 2016 to 2021, the neat national bar melts into a mosaic. A higher gap indicates that immigrants devote a higher portion of income to housing than non-immigrants. From Figure 2, We can see how the relative burden widened most in second tier and fast growing CMAs such as Oshawa, Kitchener Waterloo, Kingston Peterborough, Windsor, and several Atlantic cities. In 2016, many of these markets sat near parity or even showed small advantages for immigrants. By 2021, several had flipped to sizeable disadvantages. Toronto and Vancouver still posted the largest raw gaps in 2021, roughly nine percentage points in both cases. For example, in Toronto, if a non-immigrant household spent 30% of income on housing in 2016, a comparable immigrant household spent about 40%. Yet those gaps narrowed slightly from 2016 as some long tenured immigrants saw earnings gains and as households redistributed across metro regions. The diffusion of pressure into mid-sized markets matters. People followed opportunity and relative affordability beyond the classic gateways, but purpose built rental and missing middle supply did not keep pace with student and worker inflows. Secondary CMAs and suburbs now need newcomer ready housing strategies every bit as much as the big three.
+```{r rq2-cma-prep, message=FALSE, warning=FALSE, echo=FALSE}
+# weighted median helper
+wtd_median <- function(x, w){
+  ok <- is.finite(x) & is.finite(w); x <- x[ok]; w <- w[ok]
+  if (!length(x)) return(NA_real_)
+  o <- order(x); x <- x[o]; w <- w[o]
+  cw <- cumsum(w)/sum(w); x[which(cw >= 0.5)[1]]
+}
+
+# macaron colors
+macaron_2016  <- "#F8C8DC"  # pink
+macaron_2021  <- "#B8E0D2"  # mint
+macaron_narr  <- "#F8C8DC"  # narrowed (pink)
+macaron_wide  <- "#B8E0D2"  # widened (mint)
+
+# CMA code → city name (from your guide)
+cma_lookup <- tibble::tribble(
+  ~cma, ~city,
+  205,"Halifax",
+  399,"Moncton — Saint John",
+  421,"Québec",
+  462,"Montréal",
+  499,"Sherbrooke — Trois-Rivières",
+  505,"Ottawa–Gatineau",
+  532,"Oshawa",
+  535,"Toronto",
+  537,"Hamilton",
+  539,"St. Catharines–Niagara",
+  541,"Kitchener–Cambridge–Waterloo",
+  555,"London",
+  559,"Windsor",
+  577,"Brantford — Guelph — Barrie",
+  588,"Kingston — Peterborough",
+  599,"Greater Sudbury — Thunder Bay",
+  602,"Winnipeg",
+  799,"Regina — Saskatoon",
+  825,"Calgary",
+  835,"Edmonton",
+  933,"Vancouver",
+  935,"Victoria",
+  988,"Kelowna — Abbotsford–Mission",
+  999,"Other geographies"
+)
+
+# Build tidy STIR dataset (only vars needed here)
+cma_base <- census_all |>
+  mutate(
+    immstat    = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    prihm      = ifelse(prihm   %in% c(9),  NA_integer_, prihm),
+    tot_inc_at = ifelse(is.finite(tot_inc_at) & tot_inc_at > 0, tot_inc_at, NA_real_),
+    shelco     = ifelse(is.finite(shelco)     & shelco >= 0,    shelco,     NA_real_),
+    weight     = ifelse(is.finite(weight)     & weight > 0,     weight,     NA_real_)
+  ) |>
+  select(year, cma, immstat, prihm, tot_inc_at, shelco, weight) |>
+  tidyr::drop_na(cma, immstat, prihm, tot_inc_at, shelco, weight) |>
+  filter(prihm == 1, cma != 999) |>
+  mutate(
+    stir = (shelco * 12) / pmax(tot_inc_at, 1),
+    group = case_when(
+      immstat == 1 ~ "Non-immigrant",
+      immstat == 2 ~ "Immigrant",
+      immstat == 3 ~ "Non-permanent resident",
+      TRUE ~ NA_character_
+    )
+  ) |>
+  filter(group %in% c("Non-immigrant","Immigrant"), is.finite(stir), stir >= 0)
+
+# Weighted MEDIAN STIR by CMA × status × year, then GAP = Imm − Non
+cma_gap <- cma_base |>
+  group_by(year, cma, group) |>
+  summarize(med_stir = wtd_median(stir, weight), .groups = "drop") |>
+  tidyr::pivot_wider(names_from = group, values_from = med_stir) |>
+  filter(!is.na(Immigrant), !is.na(`Non-immigrant`)) |>
+  mutate(gap = Immigrant - `Non-immigrant`) |>
+  left_join(cma_lookup, by = "cma") |>
+  filter(city != "Other geographies")
+
+# Wide (2016 vs 2021) and a consistent city order by 2021 gap (largest first)
+gap_wide <- cma_gap |>
+  select(city, year, gap) |>
+  tidyr::pivot_wider(names_from = year, values_from = gap, names_prefix = "y") |>
+  filter(!is.na(y2016), !is.na(y2021))
+
+city_order <- gap_wide |>
+  arrange(desc(y2021)) |>
+  pull(city)
+
+gap_wide <- gap_wide |>
+  mutate(city = factor(city, levels = city_order))
+
+# Long table for Plot 2 (two columns)
+gap_long <- cma_gap |>
+  mutate(city = factor(city, levels = city_order))
+
+```
+
+```{r rq2-plot1-change, fig.width=10.5, fig.height=7, include=FALSE}
+delta_tbl <- gap_wide |>
+  mutate(
+    delta = y2021 - y2016,
+    dir   = if_else(delta >= 0, "Widened (gap ↑)", "Narrowed (gap ↓)")
+  ) |>
+  # ORDER cities by how much they changed: biggest widening at top
+  mutate(city = forcats::fct_reorder(city, delta, .desc = TRUE))
+
+
+ggplot(delta_tbl, aes(x = delta, y = city, fill = dir)) +
+  geom_col(width = 0.6, alpha = 0.95) +
+  geom_text(aes(label = scales::percent(delta, accuracy = 0.1)),
+            hjust = ifelse(delta_tbl$delta >= 0, -0.15, 1.15),
+            size = 3.2) +
+  scale_fill_manual(
+    values = c("Widened (gap ↑)" = macaron_wide,
+               "Narrowed (gap ↓)" = macaron_narr),
+    name = NULL
+  ) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.05, 0.12))) +
+  labs(
+    title = "Which CMAs changed the most? 2016 → 2021 change in the median STIR gap (Imm − Non)",
+    subtitle = "Positive = gap widened (immigrants’ median STIR moved further above non-immigrants). Negative = gap narrowed.",
+    x = "Δ Gap in median STIR (percentage points)", y = NULL,
+    caption = "Figure 2 - STIR = (monthly shelter cost × 12) / individual after-tax income. Primary household maintainers only; person weights applied."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 9)
+  ) + 
+  theme(
+    plot.caption.position = "plot",
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 8))
+  )
+
+```
+
+```{r rq2-plot2-two-panels, fig.width=11, fig.height=7.5, echo=FALSE}
+ggplot(gap_long, aes(x = gap, y = city, fill = factor(year))) +
+  geom_col(width = 0.6, alpha = 0.95) +
+  geom_text(aes(label = scales::percent(gap, accuracy = 0.1)),
+            hjust = ifelse(gap_long$gap >= 0, -0.15, 1.15),
+            size = 3.0) +
+  facet_wrap(~ year, ncol = 2, scales = "free_x") +
+  scale_fill_manual(values = c(`2016` = macaron_2016, `2021` = macaron_2021),
+                    name = NULL, labels = c("2016 (gap = Imm − Non)", "2021 (gap = Imm − Non)")) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0.05, 0.12))) +
+  labs(
+    title = "Local Divergence between Census metropolitan area",
+    subtitle = "Median STIR difference (Imm − Non)",
+    x = "Gap in median STIR (percentage points)", y = NULL,
+    caption = "STIR = (monthly shelter cost × 12) / individual after-tax income. Primary household maintainers only; person weights applied. \n\nFigure 2"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold")
+  ) + 
+  theme(
+    plot.caption.position = "plot",
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 8))
+  )
+
+
+```
+
+\newpage
+
+# What is Really Driving the Housing Cost Burden?
+STIR is a ratio. You can move it by raising housing costs or by lowering income. On the left panel of Figure 3, we compare each city’s income gap to its STIR gap; dots slide downward. We can see a negative income gap, showing immigrants earn less than non-immigrants, leading to the larger housing affordability gap between the two groups. The right panel captures a positive shelter cost, showing immigrants pay more for shelter than non-immigrants, also leading to the larger STIR gap, but the relationship is looser. Put simply, the difference in earnings between immigrants and non-immigrants explains more of the housing affordability gap than the difference in what people pay for housing.
+
+The cross city evidence points decisively toward earnings. That pattern fits the everyday settlement economics. Newcomers cluster where jobs are, then spend several years climbing the earnings ladder as credentials are recognized, networks deepen, and language confidence grows. During that ramp, identical rents can still yield a higher STIR simply because the denominator income is smaller. If the goal is to narrow the gap, the solution is not only cheaper homes. It is faster and fairer to work on the income gap between immigrants and non-immigrants.
+
+```{r rq4_scatter_by_driver, message=FALSE, warning=FALSE, fig.width=12, fig.height=6.8, echo=FALSE}
+# helpers
+wtd_median <- function(x, w){
+  ok <- is.finite(x) & is.finite(w); x <- x[ok]; w <- w[ok]
+  if (!length(x)) return(NA_real_)
+  o <- order(x); x <- x[o]; w <- w[o]
+  cw <- cumsum(w)/sum(w); x[which(cw >= 0.5)[1]]
+}
+
+# colors
+col16 <- "#F8C8DC"  # 2016 (pink)
+col21 <- "#B8E0D2"  # 2021 (mint)
+
+# build tidy frame (primary maintainers only)
+base <- census_all |>
+  mutate(
+    immstat    = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    prihm      = ifelse(prihm   %in% c(9),  NA_integer_, prihm),
+    weight     = ifelse(is.finite(weight) & weight > 0, weight, NA_real_),
+    tot_inc_at = ifelse(is.finite(tot_inc_at) & tot_inc_at > 0, tot_inc_at, NA_real_),
+    shelco     = ifelse(is.finite(shelco) & shelco >= 0,    shelco,     NA_real_)
+  ) |>
+  select(year, cma, immstat, prihm, weight, tot_inc_at, shelco) |>
+  tidyr::drop_na(immstat, prihm, weight, tot_inc_at, shelco) |>
+  filter(prihm == 1) |>
+  mutate(
+    status = case_when(
+      immstat == 1 ~ "Non-immigrant",
+      immstat == 2 ~ "Immigrant",
+      TRUE ~ NA_character_
+    ),
+    stir = (shelco * 12) / pmax(tot_inc_at, 1)
+  ) |>
+  filter(status %in% c("Non-immigrant","Immigrant"),
+         is.finite(stir), stir >= 0)
+
+# CMA-level weighted medians for each group and year
+cma_stats <- base |>
+  mutate(
+    # sanitize status so wide names are syntactic
+    status_clean = dplyr::recode(status,
+                                 "Immigrant"     = "Immigrant",
+                                 "Non-immigrant" = "Non_immigrant")
+  ) |>
+  group_by(year, cma, status_clean) |>
+  summarise(
+    med_stir = wtd_median(stir, weight),
+    med_inc  = wtd_median(tot_inc_at, weight),
+    med_cost = wtd_median(shelco,     weight),
+    pop_w    = sum(weight),
+    .groups = "drop"
+  ) |>
+  tidyr::pivot_wider(
+    names_from  = status_clean,
+    values_from = c(med_stir, med_inc, med_cost, pop_w)
+  ) |>
+  # keep only CMAs present for both groups
+  dplyr::filter(!is.na(med_stir_Immigrant), !is.na(med_stir_Non_immigrant))
+
+# define gaps
+cma_gaps <- cma_stats |>
+  transmute(
+    year, cma,
+    # y: STIR gap (Imm − Non) in STIR units; you plot as percentage later
+    stir_gap = med_stir_Immigrant - med_stir_Non_immigrant,
+    # x: relative gaps on log scale (Imm − Non)
+    x_income = log(med_inc_Immigrant) - log(med_inc_Non_immigrant),
+    x_cost   = log(med_cost_Immigrant) - log(med_cost_Non_immigrant),
+    size_w   = pmin(pop_w_Immigrant, pop_w_Non_immigrant, na.rm = TRUE)
+  ) |>
+  tidyr::pivot_longer(
+    cols = c(x_income, x_cost),
+    names_to = "driver", values_to = "xgap"
+  ) |>
+  mutate(
+    driver = dplyr::recode(driver,
+                           x_income = "Income gap (log, Imm − Non)",
+                           x_cost   = "Shelter-cost gap (log, Imm − Non)")
+  )
+
+# ---- Fit per-panel stats and build annotation labels ----
+# slope is in "percentage points of STIR gap per 1.0 log-unit xgap"
+# To interpret, a 10% relative gap ≈ log(1.10) ≈ 0.0953
+to_10pp <- log(1.10)
+
+fit_tbl <- cma_gaps |>
+  group_by(driver, year) |>
+  do({
+    m <- lm(stir_gap ~ xgap, data = .)
+    out <- broom::glance(m)
+    coef <- broom::tidy(m)
+    slope <- coef$estimate[coef$term == "xgap"]
+    tibble::tibble(
+      slope = slope,
+      r2 = out$r.squared,
+      eff_10 = slope * to_10pp   # pp change in STIR gap for a 10% relative gap on x
+    )
+  }) |>
+  ungroup() |>
+  mutate(
+    label = paste0(
+      "slope = ", scales::number(slope, accuracy = 0.001), " pp / log-unit\n"
+    )
+  )
+
+# Place labels near the top-left of each facet
+pos_tbl <- cma_gaps |>
+  group_by(driver) |>
+  summarise(
+    x_min = quantile(xgap, 0.05, na.rm = TRUE),
+    y_max = quantile(stir_gap, 0.95, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ann_df <- fit_tbl |>
+  left_join(pos_tbl, by = "driver") |>
+  mutate(x = x_min, y = y_max)
+
+# ---- Plot with annotations ----
+ggplot(cma_gaps, aes(x = xgap, y = stir_gap, colour = factor(year), fill = factor(year))) +
+  geom_hline(yintercept = 0, colour = "grey75", linetype = "dashed") +
+  geom_vline(xintercept = 0, colour = "grey80") +
+  geom_point(aes(size = size_w), shape = 21, alpha = 0.85, stroke = 0.4) +
+  geom_smooth(se = FALSE, method = "lm", linewidth = 0.9) +
+  ggrepel::geom_text_repel(
+    data = subset(cma_gaps, cma %in% c(535, 462, 933)),
+    aes(label = dplyr::case_when(cma == 535 ~ "Toronto", cma == 462 ~ "Montréal", cma == 933 ~ "Vancouver")),
+    size = 3, colour = "grey30", min.segment.length = 0, seed = 10
+  ) +
+  geom_label(
+    data = ann_df,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE, size = 3, label.size = 0, fill = "white", hjust = 0
+  ) +
+  facet_wrap(~ driver, nrow = 1, scales = "free_x") +
+  scale_size_continuous(range = c(3, 9),
+                        labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+                        name = "Minimum group population (weighted)") +
+  scale_colour_manual(values = c(`2016` = "#F8C8DC", `2021` = "#B8E0D2"), name = NULL) +
+  scale_fill_manual(values  = c(`2016` = "#F8C8DC", `2021` = "#B8E0D2"), name = NULL) +
+  scale_x_continuous(labels = ~scales::percent(exp(.x) - 1, accuracy = 1)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Which side tracks the immigrant–non-immigrant STIR gap across CMAs?",
+    subtitle = "Each dot is a CMA. Left: income gap; Right: shelter-cost gap. Lines are OLS fits by year.\nLabel shows slope, R², and the effect of a 10% relative gap on STIR gap (percentage points).",
+    x = "Relative gap (Immigrant vs Non-immigrant)",
+    y = "STIR gap (percentage points, Immigrant − Non-immigrant)",
+    caption = "STIR = (monthly shelter cost × 12) / individual after-tax income. Weighted medians; primary household maintainers only. \n\nFigure 3"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", panel.grid.minor = element_blank(), strip.text = element_text(face = "bold")) + 
+  theme(
+    plot.caption.position = "plot",
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 8))
+  )
+
+
+```
+\newpage
+
+# The Widening Gap: Persistent Renter Disadvantage, Rising Owner Burden
+Tenure does not explain the gap away. Looking at the scatterplot in Figure 4, while holding renter versus owner constant, immigrants still devote a higher share of income to shelter. Among renters, the immigrant disadvantage is noticeable and steady. Among owners, the gap is roughly twice as large, and it widened from 2016 to 2021. The owner pattern is especially telling. Many immigrant owners are recent buyers with higher debt service and thinner equity cushions. Pair that mortgage math with lower earnings, and the cost-to-income ratio climbs quickly. By contrast, long tenured non-immigrant owners often benefit from earlier purchase prices, lower balances, and accumulated equity, all of which dampen STIR. Rents are more standardized within local markets, so once you fix tenure, much of the remaining difference is an income gap smaller for renters, larger and growing for owners. This future proved our findings earlier in Figure 3, where differences in earnings are the main cause of the widening STIR over the years.
+```{r rq5_tenure_gap, message=FALSE, warning=FALSE, fig.width=9.5, fig.height=6.2, echo=FALSE}
+
+# Macaron palette (consistent with earlier figs)
+col16 <- "#B8E0D2"  # 2016
+col21 <- "#66A6A1"  # 2021 (a deeper macaron mint for contrast)
+
+# Helper: weighted median
+wtd_median <- function(x, w){
+  ok <- is.finite(x) & is.finite(w)
+  x <- x[ok]; w <- w[ok]
+  if (!length(x)) return(NA_real_)
+  o <- order(x); x <- x[o]; w <- w[o]
+  cw <- cumsum(w) / sum(w)
+  x[which(cw >= 0.5)[1]]
+}
+
+# Build clean frame (primary household maintainers only)
+tenure_base <- census_all |>
+  mutate(
+    immstat    = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    tenur      = ifelse(tenur   %in% c(8),  NA_integer_, tenur),   # 8 = Not available
+    prihm      = ifelse(prihm   %in% c(9),  NA_integer_, prihm),   # 9 = Not applicable
+    weight     = ifelse(is.finite(weight)     & weight > 0,     weight,     NA_real_),
+    tot_inc_at = ifelse(is.finite(tot_inc_at) & tot_inc_at > 0, tot_inc_at, NA_real_),
+    shelco     = ifelse(is.finite(shelco)     & shelco >= 0,    shelco,     NA_real_)
+  ) |>
+  select(year, immstat, tenur, prihm, weight, tot_inc_at, shelco) |>
+  tidyr::drop_na(immstat, tenur, prihm, weight, tot_inc_at, shelco) |>
+  filter(prihm == 1) |>
+  mutate(
+    status = case_when(
+      immstat == 1 ~ "Non-immigrant",
+      immstat == 2 ~ "Immigrant",
+      TRUE ~ NA_character_
+    ),
+    tenure = case_when(
+      tenur == 1 ~ "Owner",
+      tenur == 2 ~ "Renter",
+      TRUE ~ NA_character_
+    ),
+    stir = (shelco * 12) / pmax(tot_inc_at, 1)
+  ) |>
+  filter(status %in% c("Non-immigrant","Immigrant"),
+         tenure %in% c("Owner","Renter"),
+         is.finite(stir), stir >= 0)
+
+# Weighted medians by year × tenure × status
+tenure_stats <- tenure_base |>
+  group_by(year, tenure, status) |>
+  summarise(
+    med_stir = wtd_median(stir, weight),
+    n_w      = sum(weight),
+    .groups = "drop"
+  ) |>
+  # make wide with syntactic names
+  mutate(status_clean = dplyr::recode(status,
+                                      "Immigrant"     = "Immigrant",
+                                      "Non-immigrant" = "Non_immigrant")) |>
+  select(year, tenure, status_clean, med_stir) |>
+  tidyr::pivot_wider(names_from = status_clean, values_from = med_stir)
+
+# Gap = Imm − Non within tenure and year
+tenure_gap <- tenure_stats |>
+  mutate(gap = Immigrant - Non_immigrant) |>
+  mutate(
+    tenure = factor(tenure, levels = c("Renter","Owner")),
+    year   = factor(year)
+  )
+
+# For labels (+11.9 pp style)
+tenure_gap <- tenure_gap |>
+  mutate(
+    lbl = paste0(ifelse(gap >= 0, "+", ""), percent(gap, accuracy = 0.1))
+  )
+
+# Axis arrow placement
+ymin <- min(0, min(tenure_gap$gap, na.rm = TRUE))
+ymax <- max(tenure_gap$gap, na.rm = TRUE)
+ypad <- (ymax - ymin) * 0.15
+
+ggplot(tenure_gap, aes(x = tenure, y = gap, fill = year)) +
+  # zero baseline
+  geom_hline(yintercept = 0, colour = "grey70", linetype = "dashed") +
+  # bars
+  geom_col(position = position_dodge(width = 0.6), width = 0.5, alpha = 0.95) +
+  # labels on bars
+  geom_text(aes(label = lbl),
+            position = position_dodge(width = 0.6),
+            vjust = -0.5, size = 3.6) +
+  scale_fill_manual(values = c(`2016` = col16, `2021` = col21), name = NULL) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(ymin - ypad*0.15, ymax + ypad)) +
+  labs(
+    title = "Tenure Comparison of Median STIR difference (Imm − Non)",
+    subtitle = "Bars above zero indicate immigrants bear a higher housing cost share within the same tenure.",
+    x = NULL,
+    y = "Gap in median STIR (percentage points)",
+    caption = "STIR = (monthly shelter cost × 12) / individual after-tax income. Primary household maintainers only; person weights applied.\n\nFigure 4"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  ) + 
+  theme(
+    plot.caption.position = "plot",
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 8))
+  )
+
+
+```
+
+\newpage
+# Is the Public Debate True?
+Now to the viral claim. Did cities with larger increases in immigrant share between 2016 and 2021 see bigger increases in non-immigrants’ housing burden? Are newcomers really affecting the locals’ lives?
+
+If rising immigrant shares in a city made housing less affordable for non-immigrants, we would see the non-immigrant cost burden rise systematically where immigrant shares jump. We do not. Figure 5 shows a scatter of change in immigrant share against change in non-immigrant burden between 2016 and 2021, producing a fitted line that is shallow and statistically non-significant. The explanatory power is tiny, and in many cities non-immigrant housing burden actually fell even as the immigrant share rose.
+
+Meanwhile, the immigrant population did grow substantially during the period. Canada counted about 847,000 more immigrants in 2021 than in 2016, an 11% increase nationally. The big three CMAs grew the most with Vancouver in the lead, adding roughly 10.3% more share of immigrants (Table 1). Those are large numbers, yet the direction and size of the non-immigrant burden moved for many other reasons. The widening immigrant disadvantage seen in the city-by-city charts is better explained by income trajectories, recent buyer mortgage exposure, and the mismatch between where people land and where rental supply exists than a simple claim of  “more immigrants leads to higher housing cost for locals” story.
+
+```{r rq3_delta_scatter_clean, message=FALSE, warning=FALSE, fig.width=10.5, fig.height=7.2, echo=FALSE}
+# helper
+w_share_over <- function(x, w, thr){
+  ok <- is.finite(x) & is.finite(w); if (!any(ok)) return(NA_real_)
+  sum(w[ok] * (x[ok] >= thr)) / sum(w[ok])
+}
+
+# Build CMA-year metrics for 2016 & 2021 (primary maintainers only)
+base <- census_all |>
+  mutate(
+    immstat    = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    prihm      = ifelse(prihm   %in% c(9),  NA_integer_, prihm),
+    tot_inc_at = ifelse(is.finite(tot_inc_at) & tot_inc_at > 0, tot_inc_at, NA_real_),
+    shelco     = ifelse(is.finite(shelco)     & shelco >= 0,    shelco,     NA_real_),
+    weight     = ifelse(is.finite(weight)     & weight > 0,     weight,     NA_real_)
+  ) |>
+  select(year, cma, immstat, prihm, tot_inc_at, shelco, weight) |>
+  tidyr::drop_na(cma, immstat, prihm, tot_inc_at, shelco, weight) |>
+  filter(prihm == 1, cma != 999) |>
+  mutate(
+    stir = (shelco * 12) / pmax(tot_inc_at, 1),
+    is_imm    = immstat == 2,
+    is_nonimm = immstat == 1
+  ) |>
+  filter(is.finite(stir), stir >= 0)
+
+cma_year <- base |>
+  group_by(year, cma) |>
+  summarize(
+    imm_share            = sum(weight * is_imm) / sum(weight),
+    nonimm_burden_ge30   = w_share_over(stir[is_nonimm], weight[is_nonimm], 0.30),
+    pop_w                = sum(weight),
+    .groups = "drop"
+  ) |>
+  left_join(cma_lookup, by = "cma") |>
+  filter(city != "Other geographies")
+
+delta <- cma_year |>
+  select(city, year, imm_share, nonimm_burden_ge30, pop_w) |>
+  tidyr::pivot_wider(names_from = year, values_from = c(imm_share, nonimm_burden_ge30, pop_w), names_sep = "_") |>
+  mutate(
+    d_imm            = imm_share_2021 - imm_share_2016,
+    d_nonimm_burden  = nonimm_burden_ge30_2021 - nonimm_burden_ge30_2016
+  )
+
+# ---- Fit the trendline and prepare an annotation ----
+# Unweighted OLS; if you prefer population-weighted, add: weights = pop_w_2021
+mod <- lm(d_nonimm_burden ~ d_imm, data = delta)
+sm  <- summary(mod)
+slope     <- coef(sm)[2, 1]         # change in burden per 1.00 change in immigrant share (both in 0..1 units)
+intercept <- coef(sm)[1, 1]
+pval      <- coef(sm)[2, 4]
+r2        <- sm$r.squared
+
+# Nice label (percent-percentage-point interpretation)
+eq_label <- paste0(
+  "Δ non-imm burden = ", percent(intercept, accuracy = 0.01),
+  " + ", percent(slope, accuracy = 0.01), " × Δ immigrant share\n",
+  "R² = ", formatC(r2, format = "f", digits = 3),
+  ", slope p = ", formatC(pval, format = "f", digits = 3)
+)
+
+# ---- Plot ----
+pt_fill <- "#B8E0D2"; pt_stroke <- "grey35"
+big3 <- c("Toronto","Vancouver","Montréal")
+lab_df <- delta |> filter(city %in% big3)
+
+xmin <- min(delta$d_imm, na.rm=TRUE); xmax <- max(delta$d_imm, na.rm=TRUE)
+ymin <- min(delta$d_nonimm_burden, na.rm=TRUE); ymax <- max(delta$d_nonimm_burden, na.rm=TRUE)
+xpad <- (xmax - xmin)*0.12; ypad <- (ymax - ymin)*0.12
+
+ggplot(delta, aes(d_imm, d_nonimm_burden)) +
+  # Axes with arrows and zero crosshair
+  geom_segment(aes(x = xmin - xpad, xend = xmax + xpad, y = 0, yend = 0), inherit.aes = FALSE, colour="grey70") +
+  geom_segment(aes(x = 0, xend = 0, y = ymin - ypad, yend = ymax + ypad), inherit.aes = FALSE, colour="grey70") +
+  geom_segment(aes(x = xmin - xpad, xend = xmax + xpad, y = ymin - ypad, yend = ymin - ypad),
+               inherit.aes = FALSE, linewidth=0.7, arrow = arrow(length = unit(7,"pt"), type="closed")) +
+  geom_segment(aes(x = xmin - xpad, xend = xmin - xpad, y = ymin - ypad, yend = ymax + ypad),
+               inherit.aes = FALSE, linewidth=0.7, arrow = arrow(length = unit(7,"pt"), type="closed")) +
+  # Bubbles and fitted line
+  geom_point(aes(size = pop_w_2021), shape = 21, fill = pt_fill, colour = pt_stroke, alpha = 0.9) +
+  geom_smooth(method = "lm", se = FALSE, colour = "grey35", linewidth = 0.9) +
+  # Labels for big three
+  ggrepel::geom_text_repel(data = lab_df, aes(label = city), size = 3.3, seed = 10,
+                           min.segment.length = 0, box.padding = 0.25, point.padding = 0.2) +
+  # Trendline stats annotation (top-left)
+  annotate("label",
+           x = xmin + 0.03*(xmax - xmin),
+           y = ymax - 0.04*(ymax - ymin),
+           label = eq_label, hjust = 0, vjust = 1,
+           label.size = 0, fill = "white") +
+  scale_size_continuous(range = c(5, 18),
+                        labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+                        name = "CMA population (weighted)") +
+  scale_x_continuous(labels = percent_format(accuracy = 0.1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  labs(
+    title = "Did CMAs with bigger immigrant-share increases see bigger rises in non-immigrant burden?",
+    subtitle = "Each point is a CMA. X is the change in immigrant share from 2016 to 2021. Y is the change in non-immigrant share with STIR ≥ 30% over the same period.",
+    x = "Change in immigrant share (percentage points, 2016 → 2021)",
+    y = "Change in non-immigrant cost-burden share (percentage points, 2016 → 2021)",
+    caption = "STIR = (monthly shelter cost × 12) / individual after-tax income. Primary household maintainers only; person weights applied. \n\nFigure 5"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", panel.grid.minor = element_blank()) + theme(
+    plot.caption.position = "plot",
+    plot.caption = element_text(hjust = 0.5, margin = margin(t = 8))
+  )
+
+```
+
+```{r rq_counts_imm_growth, message=FALSE, warning=FALSE, include=FALSE}
+# Immigration Statistics
+# Recode only the vars we need here
+imm_people <- census_all |>
+  mutate(
+    immstat = ifelse(immstat %in% c(88), NA_integer_, immstat),
+    weight  = ifelse(is.finite(weight) & weight > 0, weight, NA_real_)
+  ) |>
+  tidyr::drop_na(immstat, weight) |>
+  mutate(is_imm = immstat == 2)
+
+# ---------- National ----------
+nat_tbl <- imm_people |>
+  group_by(year) |>
+  summarise(
+    immigrants = sum(weight * is_imm),
+    population = sum(weight),
+    imm_share  = immigrants / population,
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = year, values_from = c(immigrants, population, imm_share), names_sep = "_") |>
+  mutate(
+    immigrants_increase     = immigrants_2021 - immigrants_2016,
+    immigrants_pct_change   = immigrants_increase / immigrants_2016
+  )
+
+# ---------- National (formatted table) ----------
+v <- nat_tbl |> dplyr::slice(1)  # grab the single row as scalars
+
+nat_fmt <- tibble::tibble(
+  Metric = c(
+    "Immigrants 2016", "Immigrants 2021",
+    "Increase (abs.)", "Increase (%)",
+    "Population 2016", "Population 2021",
+    "Immigrant share 2016", "Immigrant share 2021"
+  ),
+  Value = c(
+    scales::comma(v$immigrants_2016),
+    scales::comma(v$immigrants_2021),
+    scales::comma(v$immigrants_increase),
+    scales::percent(v$immigrants_pct_change, accuracy = 0.1),
+    scales::comma(v$population_2016),
+    scales::comma(v$population_2021),
+    scales::percent(v$imm_share_2016, accuracy = 0.1),
+    scales::percent(v$imm_share_2021, accuracy = 0.1)
+  )
+)
+
+knitr::kable(nat_fmt, caption = "Canada: immigrants and total population (weighted), 2016 vs 2021")
+```
+
+```{r echo=FALSE}
+# ---------- Big three CMAs ----------
+big3_codes <- c(535, 462, 933)  # Toronto, Montréal, Vancouver
+cma_names <- tibble(
+  cma  = big3_codes,
+  city = c("Toronto","Montréal","Vancouver")
+)
+
+big3_tbl <- imm_people |>
+  filter(!is.na(cma), cma %in% big3_codes) |>
+  group_by(cma, year) |>
+  summarise(
+    immigrants = sum(weight * is_imm),
+    population = sum(weight),
+    imm_share  = immigrants / population,
+    .groups = "drop"
+  ) |>
+  left_join(cma_names, by = "cma") |>
+  select(city, year, immigrants, population, imm_share) |>
+  pivot_wider(names_from = year, values_from = c(immigrants, population, imm_share), names_sep = "_") |>
+  mutate(
+    immigrants_increase   = immigrants_2021 - immigrants_2016,
+    immigrants_pct_change = immigrants_increase / immigrants_2016
+  ) |>
+  mutate(
+    `Immigrants 2016`     = comma(immigrants_2016),
+    `Immigrants 2021`     = comma(immigrants_2021),
+    `Increase (abs.)`     = comma(immigrants_increase),
+    `Increase (%)`        = percent(immigrants_pct_change, accuracy = 0.1),
+    `Share 2016`          = percent(imm_share_2016, accuracy = 0.1),
+    `Share 2021`          = percent(imm_share_2021, accuracy = 0.1)
+  ) |>
+  select(
+    City = city, `Immigrants 2016`, `Immigrants 2021`,
+    `Increase (abs.)`, `Increase (%)`, `Share 2016`, `Share 2021`
+  )
+
+knitr::kable(big3_tbl, caption = "Toronto, Montréal, Vancouver: immigrants and shares (weighted), 2016 vs 2021")
+
+```
+
+
+# Attitude Towards Immigration Weakens Canada's Advantage in Attracting Global Talent
+Seen through an economic lens, this is a story about growth, productivity, and Canada’s competitiveness for talent. Underemployment of skilled immigrants is a direct productivity loss. When an engineer waits years for licensing, the wage penalty shows up as a higher housing share and less discretionary spending in the local economy. Concentrate those dynamics in growth reliant mid sized cities and you create a consumption drag that blunts the very expansion those regions hope to capture. High STIR and credit frictions suppress entrepreneurship, closing off a channel through which immigrants often create jobs. When rentals are scarce or expensive where the best jobs are, labour mobility and matching suffer, keeping workers out of their most productive roles. Slower earnings paired with higher debt service delay wealth accumulation, widening cohort and place based gaps that can persist across generations. Finally, if the perceived deal is high cost, slow credentialing, and thin rental supply, Canada’s magnetic pull for global talent weakens, raising acquisition costs for universities and employers and fraying the growth model built on immigration.
+
+# What Should be Done?
+The findings point to a two-track response. Canada needs more homes where people actually land, and faster conversion of newcomer human capital into local paycheques. On the housing side, legalize missing middle forms in established neighbourhoods, set firm approval timelines, backstop purpose built rental so projects pencil even when rates are high, and align transit with densification so new supply lands where people want to live. On the earnings side, speed up credential recognition with supervised practice and competency based licensing in regulated occupations, design bridge programs tied to real vacancies and sectoral language training, reform Canadian experience screens, and use targeted first job wage supports to overcome employer risk. Lower entry frictions with credit light tenant screening and portable references, and consider shared equity or down payment support for qualified first time immigrant buyers to shrink the outsized owner side gap created by recent purchase exposure. Measure what matters with public dashboards that track years since landing by CMA and tenure for both earnings and STIR, so governments are accountable for converting human capital into local incomes where people actually settle.
+
+# End Words
+From 2016 to 2021, immigrants in Canada consistently spent more of their income on shelter than non-immigrants. The gap spread from the classic gateways to mid-sized markets. It is explained more by earnings differences than by what households pay for housing. It persists within tenure, and it is largest for recent immigrant owners. Crucially, places with faster immigrant growth did not see non-immigrant burdens rise in any consistent way. This is not a crowded story. It is an earnings and planning story with national stakes.
+
+
+
+
+
+
+
+
+
+
